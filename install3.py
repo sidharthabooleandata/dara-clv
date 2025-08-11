@@ -8,7 +8,7 @@ import requests
 from typing import List, Dict
 
 # ---------------- CONFIG ----------------
-TXT_PATH = "unstructured_finance_interactions.txt"
+TXT_PATH = "unstructured_finance_interactions 1.txt"
 EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 TOP_K_DEFAULT = 8
 CHUNK_SIZE = 5000
@@ -195,4 +195,5 @@ if user_query:
     answer = generate_answer(user_query, retrieved)
     st.session_state.history.append({"role": "assistant", "text": answer})
     st.rerun()
+
 
