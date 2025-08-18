@@ -1,3 +1,4 @@
+
 import streamlit as st
 from sentence_transformers import SentenceTransformer
 import faiss
@@ -5,17 +6,18 @@ import numpy as np
 import os
 import re
 import requests
+import time
 from typing import List, Dict
 
 # ---------------- CONFIG ----------------
-TXT_PATH = "unstructured_finance_interactions 1.txt"
-EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+TXT_PATH = r"unstructured_finance_interactions 1.txt"
+EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"   # try "paraphrase-MiniLM-L3-v2" if still slow
 TOP_K_DEFAULT = 8
 CHUNK_SIZE = 5000
 CHUNK_OVERLAP = 120
 MAX_CONTEXT_CHARS = 2800
 
-import os
+
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 OPENROUTER_MODEL = "mistralai/mistral-7b-instruct:free"
@@ -62,16 +64,19 @@ def load_embedding_model(name=EMBED_MODEL_NAME):
     return SentenceTransformer(name)
 
 @st.cache_resource(show_spinner=False)
-def build_faiss_index(chunks: List[Dict], _embed_model):
+def get_index_and_model(raw_text):
+    """Build FAISS index + embeddings once and cache it."""
+    chunks = chunk_text(raw_text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP)
+    embed_model = load_embedding_model()
     texts = [c["text"] for c in chunks]
-    embs = _embed_model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
+    embs = embed_model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
     norms = np.linalg.norm(embs, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
     embs_norm = embs / norms
     d = embs_norm.shape[1]
     index = faiss.IndexFlatIP(d)
     index.add(embs_norm)
-    return index, embs_norm
+    return chunks, embed_model, index, embs_norm
 
 def retrieve_by_embedding(query: str, _embed_model, index, chunks: List[Dict], embs_norm: np.ndarray, top_k=5) -> List[Dict]:
     q_emb = _embed_model.encode([query], convert_to_numpy=True)
@@ -87,7 +92,15 @@ def retrieve_by_embedding(query: str, _embed_model, index, chunks: List[Dict], e
     return results
 
 def generate_answer(question: str, retrieved_chunks: List[Dict]):
-    context_text = "\n\n".join([c["text"] for c in retrieved_chunks])
+    # ✅ truncate context so it doesn’t overload OpenRouter
+    context_text = ""
+    total_len = 0
+    for c in retrieved_chunks:
+        if total_len + len(c["text"]) > MAX_CONTEXT_CHARS:
+            break
+        context_text += "\n\n" + c["text"]
+        total_len += len(c["text"])
+
     prompt = f"""You are a helpful assistant. Use the retrieved context to answer the question.
 If the answer is not fully in the context, you may also use your general knowledge.
 
@@ -106,7 +119,7 @@ Answer:
             "model": OPENROUTER_MODEL,
             "messages": [{"role": "user", "content": prompt}],
         }
-        response = requests.post("https://openrouter.ai/api/v1/chat/completions", json=data, headers=headers)
+        response = requests.post("https://openrouter.ai/api/v1/chat/completions", json=data, headers=headers, timeout=30)
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
     except Exception as e:
@@ -121,9 +134,10 @@ if not raw_text:
     st.error(f"File not found: {TXT_PATH}")
     st.stop()
 
-chunks = chunk_text(raw_text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP)
-embed_model = load_embedding_model()
-index, embs_norm = build_faiss_index(chunks, embed_model)
+# Build index once (cached)
+start = time.time()
+chunks, embed_model, index, embs_norm = get_index_and_model(raw_text)
+st.sidebar.write(f"✅ Index loaded in {time.time()-start:.2f}s")
 
 # Sidebar
 with st.sidebar:
@@ -131,14 +145,7 @@ with st.sidebar:
         "https://booleandata.com/wp-content/uploads/2022/09/Boolean-logo_Boolean-logo-USA-1.png",
         use_container_width=True
     )
- 
-with st.sidebar:
-    st.header("Controls")
-    top_k = st.slider("Top K (retrieved chunks)", 1, 5000, TOP_K_DEFAULT)
 
-
-
- 
 # Conversation area
 st.subheader("Customer Lifetime Value Prediction")
 if "history" not in st.session_state:
@@ -152,7 +159,7 @@ for msg in st.session_state.history:
     else:
         st.markdown(f"**🤖 Boolean Assistant:** {msg['text']}")
 
-# --- fixed bottom input with send icon (aligned after sidebar) ---
+# Fixed bottom input
 st.markdown("""
     <style>
     [data-testid="stChatInput"] {
@@ -166,7 +173,7 @@ st.markdown("""
         z-index: 999;
     }
     [data-testid="stChatInput"] textarea {
-        padding-right: 36px !important; /* space for icon */
+        padding-right: 36px !important;
     }
     .send-icon {
         position: absolute;
@@ -178,10 +185,8 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Add chat input
 user_query = st.chat_input("Type your question...")
 
-# Send icon
 st.markdown(
     '<img class="send-icon" src="https://cdn-icons-png.flaticon.com/512/724/724715.png">',
     unsafe_allow_html=True
@@ -190,10 +195,9 @@ st.markdown(
 # Handle input
 if user_query:
     st.session_state.history.append({"role": "user", "text": user_query})
-    retrieved = retrieve_by_embedding(user_query, embed_model, index, chunks, embs_norm, top_k=top_k)
+    retrieved = retrieve_by_embedding(user_query, embed_model, index, chunks, embs_norm, top_k=TOP_K_DEFAULT)
     st.session_state.last_retrieved = retrieved
     answer = generate_answer(user_query, retrieved)
     st.session_state.history.append({"role": "assistant", "text": answer})
     st.rerun()
-
 
