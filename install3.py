@@ -137,7 +137,7 @@ if not raw_text:
 # Build index once (cached)
 start = time.time()
 chunks, embed_model, index, embs_norm = get_index_and_model(raw_text)
-st.sidebar.write(f"✅ Index loaded in {time.time()-start:.2f}s")
+
 
 # Sidebar
 with st.sidebar:
@@ -200,4 +200,5 @@ if user_query:
     answer = generate_answer(user_query, retrieved)
     st.session_state.history.append({"role": "assistant", "text": answer})
     st.rerun()
+
 
